@@ -1,7 +1,20 @@
-#!/usr/bin/env python3
+# Copyright (C) 2023  Miguel Ángel González Santamarta
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 
 import cv2
-import json
 import random
 import numpy as np
 from typing import Tuple
@@ -21,7 +34,6 @@ from cv_bridge import CvBridge
 from ultralytics.utils.plotting import Annotator, colors
 
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from yolo_msgs.msg import BoundingBox2D
@@ -32,20 +44,13 @@ from yolo_msgs.msg import DetectionArray
 
 
 class DebugNode(LifecycleNode):
+
     def __init__(self) -> None:
         super().__init__("debug_node")
-        
+
         self._class_to_color = {}
         self.cv_bridge = CvBridge()
-        
-        # Counting attributes
-        self._class_counts = {}
-        self._counted_ids = set()
-        
-        # Line detection parameters
-        self.detection_line = [20, 350, 940, 350]  # [x1, y1, x2, y2]
-        self.line_crossed = False
-        
+
         # params
         self.declare_parameter("image_reliability", QoSReliabilityPolicy.BEST_EFFORT)
 
@@ -61,15 +66,10 @@ class DebugNode(LifecycleNode):
             depth=1,
         )
 
-        # Publishers
+        # pubs
         self._dbg_pub = self.create_publisher(Image, "dbg_image", 10)
         self._bb_markers_pub = self.create_publisher(MarkerArray, "dgb_bb_markers", 10)
         self._kp_markers_pub = self.create_publisher(MarkerArray, "dgb_kp_markers", 10)
-        self._counts_pub = self.create_publisher(
-            String, 
-            "/vista/dashcam/debug_counter", 
-            10
-        )
 
         super().on_configure(state)
         self.get_logger().info(f"[{self.get_name()}] Configured")
@@ -79,7 +79,7 @@ class DebugNode(LifecycleNode):
     def on_activate(self, state: LifecycleState) -> TransitionCallbackReturn:
         self.get_logger().info(f"[{self.get_name()}] Activating...")
 
-        # Subscribers
+        # subs
         self.image_sub = message_filters.Subscriber(
             self, Image, "image_raw", qos_profile=self.image_qos_profile
         )
@@ -116,7 +116,6 @@ class DebugNode(LifecycleNode):
         self.destroy_publisher(self._dbg_pub)
         self.destroy_publisher(self._bb_markers_pub)
         self.destroy_publisher(self._kp_markers_pub)
-        self.destroy_publisher(self._counts_pub)
 
         super().on_cleanup(state)
         self.get_logger().info(f"[{self.get_name()}] Cleaned up")
@@ -132,6 +131,7 @@ class DebugNode(LifecycleNode):
     def draw_box(
         self, cv_image: np.ndarray, detection: Detection, color: Tuple[int]
     ) -> np.ndarray:
+
         # get detection info
         class_name = detection.class_name
         score = detection.score
@@ -148,12 +148,14 @@ class DebugNode(LifecycleNode):
         )
 
         # define the four corners of the rectangle
-        rect_pts = np.array([
-            [min_pt[0], min_pt[1]],
-            [max_pt[0], min_pt[1]],
-            [max_pt[0], max_pt[1]],
-            [min_pt[0], max_pt[1]],
-        ])
+        rect_pts = np.array(
+            [
+                [min_pt[0], min_pt[1]],
+                [max_pt[0], min_pt[1]],
+                [max_pt[0], max_pt[1]],
+                [min_pt[0], max_pt[1]],
+            ]
+        )
 
         # calculate the rotation matrix
         rotation_matrix = cv2.getRotationMatrix2D(
@@ -181,83 +183,186 @@ class DebugNode(LifecycleNode):
 
         return cv_image
 
-    def draw_detection_line(self, cv_image: np.ndarray) -> np.ndarray:
-        """Draw the detection line"""
-        color = (0, 0, 255) if self.line_crossed else (0, 255, 255)
-        thickness = 15 if self.line_crossed else 7
-        
-        cv2.line(cv_image, 
-                 (self.detection_line[0], self.detection_line[1]),
-                 (self.detection_line[2], self.detection_line[3]),
-                 color, thickness)
+    def draw_mask(
+        self, cv_image: np.ndarray, detection: Detection, color: Tuple[int]
+    ) -> np.ndarray:
+
+        mask_msg = detection.mask
+        mask_array = np.array([[int(ele.x), int(ele.y)] for ele in mask_msg.data])
+
+        if mask_msg.data:
+            layer = cv_image.copy()
+            layer = cv2.fillPoly(layer, pts=[mask_array], color=color)
+            cv2.addWeighted(cv_image, 0.4, layer, 0.6, 0, cv_image)
+            cv_image = cv2.polylines(
+                cv_image,
+                [mask_array],
+                isClosed=True,
+                color=color,
+                thickness=2,
+                lineType=cv2.LINE_AA,
+            )
         return cv_image
 
-    def check_line_crossing(self, detection: Detection) -> bool:
-        """Check if detection crosses the line"""
-        box_msg: BoundingBox2D = detection.bbox
-        
-        # Calculate center point
-        cx = box_msg.center.position.x
-        cy = box_msg.center.position.y
-        
-        # Check if center crosses line
-        if (self.detection_line[0] < cx < self.detection_line[2] and 
-            self.detection_line[1] - 20 < cy < self.detection_line[1] + 20):
-            
-            track_id = detection.id
-            if track_id and track_id not in self._counted_ids:
-                self._counted_ids.add(track_id)
-                
-                # Update class count
-                class_name = detection.class_name
-                if class_name not in self._class_counts:
-                    self._class_counts[class_name] = 0
-                self._class_counts[class_name] += 1
-                
-                # Publish updated counts
-                self.publish_counts()
-                return True
-        return False
+    def draw_keypoints(self, cv_image: np.ndarray, detection: Detection) -> np.ndarray:
 
-    def publish_counts(self) -> None:
-        """Publish counts as JSON string"""
-        counts_msg = String()
-        counts_msg.data = json.dumps(self._class_counts)
-        self._counts_pub.publish(counts_msg)
+        keypoints_msg = detection.keypoints
+
+        ann = Annotator(cv_image)
+
+        kp: KeyPoint2D
+        for kp in keypoints_msg.data:
+            color_k = (
+                [int(x) for x in ann.kpt_color[kp.id - 1]]
+                if len(keypoints_msg.data) == 17
+                else colors(kp.id - 1)
+            )
+
+            cv2.circle(
+                cv_image,
+                (int(kp.point.x), int(kp.point.y)),
+                5,
+                color_k,
+                -1,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                cv_image,
+                str(kp.id),
+                (int(kp.point.x), int(kp.point.y)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                color_k,
+                1,
+                cv2.LINE_AA,
+            )
+
+        def get_pk_pose(kp_id: int) -> Tuple[int]:
+            for kp in keypoints_msg.data:
+                if kp.id == kp_id:
+                    return (int(kp.point.x), int(kp.point.y))
+            return None
+
+        for i, sk in enumerate(ann.skeleton):
+            kp1_pos = get_pk_pose(sk[0])
+            kp2_pos = get_pk_pose(sk[1])
+
+            if kp1_pos is not None and kp2_pos is not None:
+                cv2.line(
+                    cv_image,
+                    kp1_pos,
+                    kp2_pos,
+                    [int(x) for x in ann.limb_color[i]],
+                    thickness=2,
+                    lineType=cv2.LINE_AA,
+                )
+
+        return cv_image
+
+    def create_bb_marker(self, detection: Detection, color: Tuple[int]) -> Marker:
+
+        bbox3d = detection.bbox3d
+
+        marker = Marker()
+        marker.header.frame_id = bbox3d.frame_id
+
+        marker.ns = "yolo_3d"
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.frame_locked = False
+
+        marker.pose.position.x = bbox3d.center.position.x
+        marker.pose.position.y = bbox3d.center.position.y
+        marker.pose.position.z = bbox3d.center.position.z
+
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = bbox3d.size.x
+        marker.scale.y = bbox3d.size.y
+        marker.scale.z = bbox3d.size.z
+
+        marker.color.b = color[0] / 255.0
+        marker.color.g = color[1] / 255.0
+        marker.color.r = color[2] / 255.0
+        marker.color.a = 0.4
+
+        marker.lifetime = Duration(seconds=0.5).to_msg()
+        marker.text = detection.class_name
+
+        return marker
+
+    def create_kp_marker(self, keypoint: KeyPoint3D) -> Marker:
+
+        marker = Marker()
+
+        marker.ns = "yolo_3d"
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.frame_locked = False
+
+        marker.pose.position.x = keypoint.point.x
+        marker.pose.position.y = keypoint.point.y
+        marker.pose.position.z = keypoint.point.z
+
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.05
+        marker.scale.y = 0.05
+        marker.scale.z = 0.05
+
+        marker.color.b = keypoint.score * 255.0
+        marker.color.g = 0.0
+        marker.color.r = (1.0 - keypoint.score) * 255.0
+        marker.color.a = 0.4
+
+        marker.lifetime = Duration(seconds=0.5).to_msg()
+        marker.text = str(keypoint.id)
+
+        return marker
 
     def detections_cb(self, img_msg: Image, detection_msg: DetectionArray) -> None:
+
         cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg)
         bb_marker_array = MarkerArray()
         kp_marker_array = MarkerArray()
-        
-        self.line_crossed = False
 
+        detection: Detection
         for detection in detection_msg.detections:
-            # Get/set color for class
+
+            # random color
             class_name = detection.class_name
+
             if class_name not in self._class_to_color:
                 r = random.randint(0, 255)
                 g = random.randint(0, 255)
                 b = random.randint(0, 255)
                 self._class_to_color[class_name] = (r, g, b)
+
             color = self._class_to_color[class_name]
 
-            # Check line crossing
-            if self.check_line_crossing(detection):
-                self.line_crossed = True
-
-            # Draw visualizations
             cv_image = self.draw_box(cv_image, detection, color)
-            cv_image = self.draw_detection_line(cv_image)
+            cv_image = self.draw_mask(cv_image, detection, color)
+            cv_image = self.draw_keypoints(cv_image, detection)
 
-            # Create 3D markers if available
             if detection.bbox3d.frame_id:
                 marker = self.create_bb_marker(detection, color)
                 marker.header.stamp = img_msg.header.stamp
                 marker.id = len(bb_marker_array.markers)
                 bb_marker_array.markers.append(marker)
 
-        # Publish outputs
+            if detection.keypoints3d.frame_id:
+                for kp in detection.keypoints3d.data:
+                    marker = self.create_kp_marker(kp)
+                    marker.header.frame_id = detection.keypoints3d.frame_id
+                    marker.header.stamp = img_msg.header.stamp
+                    marker.id = len(kp_marker_array.markers)
+                    kp_marker_array.markers.append(marker)
+
+        # publish dbg image
         self._dbg_pub.publish(
             self.cv_bridge.cv2_to_imgmsg(cv_image, encoding=img_msg.encoding)
         )
@@ -273,7 +378,3 @@ def main():
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
-
-if __name__ == "__main__":
-    main()

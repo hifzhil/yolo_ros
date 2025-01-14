@@ -51,8 +51,8 @@ class ObjectCounter:
         self.detection_lines = [
             [5, 150, 955, 150],
             [5, 350, 955, 350],
-            [150, 5, 150, 535],
-            [830, 5, 830, 535]
+            [230, 5, 230, 535],
+            [750, 5, 750, 535]
         ]
         self.line_colors = [(0, 255, 255) for _ in self.detection_lines]
         self.color_change_times = [None for _ in self.detection_lines]

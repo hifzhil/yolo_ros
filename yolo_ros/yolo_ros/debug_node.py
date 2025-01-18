@@ -233,6 +233,8 @@ class DebugNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def resize_image(self, image: np.ndarray) -> np.ndarray:
+        self.scale_x = self.target_width / image.shape[1]
+        self.scale_y = self.target_height / image.shape[0]
         return cv2.resize(image, (self.target_width, self.target_height))
 
     def draw_box(
@@ -244,13 +246,19 @@ class DebugNode(LifecycleNode):
         box_msg: BoundingBox2D = detection.bbox
         track_id = detection.id
 
+        # Scale the coordinates
+        scaled_x = box_msg.center.position.x * self.scale_x
+        scaled_y = box_msg.center.position.y * self.scale_y
+        scaled_width = box_msg.size.x * self.scale_x
+        scaled_height = box_msg.size.y * self.scale_y
+
         min_pt = (
-            round(box_msg.center.position.x - box_msg.size.x / 2.0),
-            round(box_msg.center.position.y - box_msg.size.y / 2.0),
+            round(scaled_x - scaled_width / 2.0),
+            round(scaled_y - scaled_height / 2.0),
         )
         max_pt = (
-            round(box_msg.center.position.x + box_msg.size.x / 2.0),
-            round(box_msg.center.position.y + box_msg.size.y / 2.0),
+            round(scaled_x + scaled_width / 2.0),
+            round(scaled_y + scaled_height / 2.0),
         )
 
         # define the four corners of the rectangle
@@ -452,9 +460,6 @@ class DebugNode(LifecycleNode):
         
         cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg)
         resized_image = self.resize_image(cv_image)
-        
-        self.scale_y = resized_image.shape[0] / self.target_height
-        self.scale_x = resized_image.shape[1] / self.target_width
         
         # Raw image
         self._raw_pub.publish(
